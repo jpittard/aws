@@ -1,38 +1,11 @@
 #!/bin/bash
 # Delete instances along with associated volumes and snapshots
-
-delete_snapshots() {
-    local snapshots="$1"
-    if [[ -n "$snapshots" ]]; then
-        echo "Deleting snapshots: $snapshots"
-        for snapshot_id in $snapshots; do
-            echo "Deleting snapshot: $snapshot_id"
-            aws ec2 delete-snapshot --snapshot-id "$snapshot_id"
-        done
-    fi
-}
-
-delete_volumes() {
-    local volumes="$1"
-    if [[ -n "$volumes" ]]; then
-        for volume_id in $volumes; do
-            echo "Waiting for volume $volume_id to become available..."
-            aws ec2 wait volume-available --volume-ids "$volume_id"
-            
-            echo "Deleting volume: $volume_id"
-            local snapshots=$(aws ec2 describe-snapshots --filters "Name=volume-id,Values=$volume_id" --query 'Snapshots[*].SnapshotId' --output text)
-            delete_snapshots "$snapshots"
-            aws ec2 delete-volume --volume-id "$volume_id"
-        done
-    else
-        echo "No volumes to delete"
-    fi
-}
+# Requires bash. Parsing text to array will not work in ksh
+# Be careful what you delete!
 
 delete_amis() {
   local instance_id="$1"
-  # Assumes there is a tag SourceInstance on the AMIs set to the instance ID
-  local ami_ids=$(aws ec2 describe-images --filters "Name=tag:SourceInstance,Values=$instance_id" --query 'Images[*].ImageId' --output text)
+  local ami_ids=$(aws ec2 describe-images --filters "Name=description,Values=*$instance_id*" --query 'Images[*].ImageId' --output text)
 
   if [ -z "$ami_ids" ]; then
       echo "No AMIs found for instance: $instance_id"
@@ -42,9 +15,14 @@ delete_amis() {
   echo "Found AMI IDs: $ami_ids"
   
   for ami_id in $ami_ids; do
-    echo "Deregistering AMI: $ami_id"
-    aws ec2 deregister-image --image-id "$ami_id"
+    delete_ami "$ami_id"
+  done
+}
 
+delete_ami() {
+    local ami_id="$1"
+    echo "Deleting: $ami_id"
+    aws ec2 deregister-image --image-id "$ami_id"
     local snapshot_ids=$(aws ec2 describe-images --image-ids "$ami_id" --query 'Images[].BlockDeviceMappings[].Ebs.SnapshotId' --output text)
     if [ -z "$snapshot_ids" ]; then
         echo "No snapshots found for AMI: $ami_id"
@@ -52,31 +30,71 @@ delete_amis() {
       echo "Deleting snapshots: $snapshot_ids"
       delete_snapshots "$snapshot_ids"
     fi
-  done
 }
 
-process_instances() {
-    local instance_ids=("$@")
-    echo "Terminating instances: ${instance_ids[*]}"
-    
-    # Process each instance
-    for instance_id in "${instance_ids[@]}"; do
-        echo "Processing instance: $instance_id"
-        local volumes=$(aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=$instance_id" --query 'Volumes[*].VolumeId' --output text)
-        echo "  volumes: $volumes"
-        aws ec2 terminate-instances --instance-ids "$instance_id"
-        delete_amis "$instance_id"
-        delete_volumes "$volumes"
+delete_snapshot() {
+    local snapshot_id="$1"
+    echo "Deleting: $snapshot_id"
+    aws ec2 delete-snapshot --snapshot-id "$snapshot_id"
+}
+
+delete_volume() {
+    local volume_id="$1"
+    echo "Deregistering: $volume_id"
+    local snapshot_output=$(aws ec2 describe-snapshots --filters "Name=volume-id,Values=$volume_id" --query 'Snapshots[*].SnapshotId' --output text)
+    echo "  snapshots: '$snapshot_output'"
+    local snapshots=($snapshot_output)
+    for id in "${snapshots[@]}"; do
+        delete_snapshot "$id"
     done
-
-    # aws ec2 terminate-instances --instance-ids "${instance_ids[@]}"
+    local output=$(aws ec2 delete-volume --volume-id "$volume_id" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        if [[ "$output" == *"InvalidVolume.NotFound"* ]]; then
+            echo "Volume already deleted: $volume_id"
+        else
+            echo "$output" >&2
+        fi
+    else
+        echo "Volume deleted: $volume_id"
+    fi
 }
 
-if [ "$#" -eq 0 ]; then
-  echo "Usage: $0 <instance_id_1> <instance_id_2> ..."
-  exit 1
-fi
+terminate_instance() {
+    local instance_id=("$1")    
+    local volume_output=$(aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=$instance_id" --query 'Volumes[*].VolumeId' --output text)
+    echo "  volumes: '$volume_output'"
 
-process_instances "$@"
+    local output=$(ec2 terminate-instances --instance-ids "$instance_id" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        if [[ "$output" == *"InvalidInstanceID.NotFound"* ]]; then
+            echo "Instance not found: $instance_id"
+            return 0
+        else
+            echo "$output" >&2
+            return 1
+        fi
+    else
+        echo "Waiting for instance $instance_id to be terminated..."
+        aws ec2 wait instance-terminated --instance-ids "$instance_id"
+        echo "Terminated $instance_id"
+    fi
 
-echo "Script finished."
+    local volumes=($volume_output)
+    for id in "${volumes[@]}"; do
+        delete_volume "$id";
+    done
+}
+
+
+terminate_instances() {
+    local instance_ids=("$@")
+    echo "Terminating: ${instance_ids[*]}"
+    
+    for instance_id in "${instance_ids[@]}"; do
+        terminate_instance "$instance_id"
+    done
+    echo "Finished"
+}
+
+
+
