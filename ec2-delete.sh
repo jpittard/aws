@@ -1,6 +1,6 @@
 #!/bin/bash
 # Delete instances along with associated volumes and snapshots
-# Requires bash. Parsing text to array will not work in ksh
+# Requires bash. Parsing text to array will not work in zsh
 # Be careful what you delete!
 
 delete_amis() {
@@ -21,7 +21,7 @@ delete_amis() {
 
 delete_ami() {
     local ami_id="$1"
-    echo "Deleting: $ami_id"
+    echo "Deregistering: $ami_id"
     aws ec2 deregister-image --image-id "$ami_id"
     local snapshot_ids=$(aws ec2 describe-images --image-ids "$ami_id" --query 'Images[].BlockDeviceMappings[].Ebs.SnapshotId' --output text)
     if [ -z "$snapshot_ids" ]; then
@@ -40,7 +40,7 @@ delete_snapshot() {
 
 delete_volume() {
     local volume_id="$1"
-    echo "Deregistering: $volume_id"
+    echo "Deleting: $volume_id"
     local snapshot_output=$(aws ec2 describe-snapshots --filters "Name=volume-id,Values=$volume_id" --query 'Snapshots[*].SnapshotId' --output text)
     echo "  snapshots: '$snapshot_output'"
     local snapshots=($snapshot_output)
@@ -64,13 +64,14 @@ terminate_instance() {
     local volume_output=$(aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=$instance_id" --query 'Volumes[*].VolumeId' --output text)
     echo "  volumes: '$volume_output'"
 
-    local output=$(ec2 terminate-instances --instance-ids "$instance_id" 2>&1)
+    local output=$(aws ec2 terminate-instances --instance-ids "$instance_id" 2>&1)
+    echo "$output"
     if [[ $? -ne 0 ]]; then
         if [[ "$output" == *"InvalidInstanceID.NotFound"* ]]; then
             echo "Instance not found: $instance_id"
             return 0
         else
-            echo "$output" >&2
+            echo "$output"
             return 1
         fi
     else
