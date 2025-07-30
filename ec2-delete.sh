@@ -64,6 +64,7 @@ terminate_instance() {
     local volume_output=$(aws ec2 describe-volumes --filters "Name=attachment.instance-id,Values=$instance_id" --query 'Volumes[*].VolumeId' --output text)
     echo "  volumes: '$volume_output'"
 
+    aws ec2 modify-instance-attribute --instance-id "$instance_id" --no-disable-api-termination
     local output=$(aws ec2 terminate-instances --instance-ids "$instance_id" 2>&1)
     echo "$output"
     if [[ $? -ne 0 ]]; then
